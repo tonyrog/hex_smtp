@@ -1,0 +1,11 @@
+{application, hex_smtp,
+ [
+  {description, "email plugin for HEX"},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+		  gen_smtp
+                 ]}
+ ]}.
