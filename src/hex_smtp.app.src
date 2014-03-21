@@ -7,5 +7,6 @@
                   kernel,
                   stdlib,
 		  gen_smtp
-                 ]}
+                 ]},
+  {mod, { hex_smtp_app, []}}
  ]}.

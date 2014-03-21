@@ -48,7 +48,7 @@ del_event(_Ref) ->
 %% output(Flags::[{atom(),term()}], Env::[{atom(),term()}]) ->
 %%    ok.
 %%
-output(Flags0, _Env) ->
+output(Flags0, Env) ->
     Account = proplists:get_value(account, Flags0),
     {ok,AccountFlags} = application:get_env(hex_smtp, Account),
     Flags = proplists:delete(account,Flags0) ++ AccountFlags,
@@ -60,13 +60,15 @@ output(Flags0, _Env) ->
 
     {Type,SubType,Parts} =
 	case proplists:get_value(body, Flags) of
-	    {text,Body} -> 
-		{<<"text">>,<<"plain">>,to_binary(Body)};
+	    {text,Body} when is_list(Body); is_binary(Body) -> 
+		Utf8 = to_utf8(hex:text_expand(Body, Env)),
+		{<<"text">>,<<"plain">>,Utf8};
 	    {image,IType,File} ->
 		{ok,Bin} = file:read_file(File),
 		{<<"image">>,to_binary(IType),Bin};
 	    Body when is_list(Body); is_binary(Body) ->
-		{<<"text">>,<<"plain">>,to_binary(Body)}
+		Utf8 = to_utf8(hex:text_expand(Body, Env)),
+		{<<"text">>,<<"plain">>,Utf8}
 	end,
     
     Headers = [{<<"From">>, From}, {<<"To">>, To}] ++
@@ -79,7 +81,7 @@ output(Flags0, _Env) ->
 
     ContentTypeParams = 
 	[{<<"content-type-params">>, 
-	  [{<<"charset">>,<<"US-ASCII">>}],
+	  [{<<"charset">>,<<"UTF-8">>}],
 	  {<<"disposition">>,<<"inline">>}}],
 
     Message = mimemail:encode({Type,SubType,Headers,
@@ -110,106 +112,55 @@ init_event(_, _) ->
 validate_event(in, _Flags) ->
     {error, no_input};
 validate_event(out, Flags) ->
-    try validate_out_event(Flags) of
-	ok -> ok;
-	Error -> Error
-    catch
-	throw:{error,Reason} ->
-	    {error,Reason}
-    end.
+    hex:validate_flags(Flags,output_spec()).
 
-%% account, from, to, body, subject, date, message_id
-validate_out_event(Flags0) ->
-    Account = get_mandatory(account, Flags0, fun erlang:is_atom/1),
-    Flags = case application:get_env(hex_smtp,Account) of
-		{ok,AccountFlags} -> 
-		    validate_account(AccountFlags),
-		    Flags0 ++ AccountFlags;
-		_ -> 
-		    throw({error, {missing_sys_config,[{hex_smtp,Account}]}})
-	    end,
-    get_mandatory(from, Flags, fun(V) -> is_rfc822(V) end),
-    get_mandatory(to, Flags, fun(V) -> is_rfc822_list(V) end),
-    get_mandatory(body, Flags, fun(V) -> is_body(V) end),
-    get_optional(date, Flags, false, fun is_boolean_or_string/1),    
-    get_optional(message_id, Flags, false, fun is_boolean_or_string/1),
-    ok.
-
-%% relay, ssl, auth, username, password, tls, port, from, date, message_id
-validate_account(Flags) ->
-    get_mandatory(relay, Flags, fun inet_parse:domain/1),
-    get_optional(port, Flags, undefined, fun is_port_number/1),
-    get_optional(ssl, Flags, false, fun erlang:is_boolean/1),
-    get_optional(username, Flags, undefined, fun is_string/1),
-    get_optional(password, Flags, undefined, fun is_string/1),
-    get_optional(tls, Flags, if_available, fun is_tls/1),
-    get_optional(auth, Flags, if_available, fun is_auth/1),
-    get_optional(retries, Flags, 1, fun is_positive_number/1),
-    get_optional(date, Flags, false, fun is_boolean_or_string/1),    
-    get_optional(message_id, Flags, false, fun is_boolean_or_string/1).
-    
-
-get_mandatory(Key, List, Validate) ->
-    case proplists:lookup(Key,List) of
-	none -> throw({error, {mandatory,[Key]}});
-	{_,Value} -> 
-	    try Validate(Value) of
-		false -> throw({error, {badarg,[Key]}});
-		true -> Value
-	    catch
-		error:_ ->
-		    throw({error, {badarg,[Key]}})
-	    end
-    end.
-
-get_optional(Key, List, Default, Validate) ->
-    case proplists:lookup(Key,List) of
-	none -> Default;
-	{_,Value} -> 
-	    try Validate(Value) of
-		false -> throw({error, {badarg,[Key]}});
-		true -> Value
-	    catch
-		error:_ ->
-		    throw({error, {badarg,[Key]}})
-	    end
-    end.
-
-is_string(Value) ->
-    (erlang:iolist_size(Value) >= 0).
-is_port_number(Value) ->
-    is_integer(Value) andalso (Value > 0) andalso (Value < 65536).
-is_boolean_or_string(Value) ->
-    is_boolean(Value) orelse is_string(Value).
-
-is_positive_number(V) -> is_integer(V) andalso (V > 0).
-is_tls(V) -> lists:member(V, [if_available,always,never]).
-is_auth(V) -> lists:member(V, [if_available,always,never]).
-
-
-is_body(Value) ->
-    case Value of
-	{text,Body} -> 
-	    (erlang:iolist_size(Body) >= 0);
-	{image,_IType,_File} ->
-	    %% fixme: check valid variants
-	    true;
-	Body when is_list(Body); is_binary(Body) ->
-	    (erlang:iolist_size(Body) >= 0);
-	_ ->
-	    false
-    end.
+output_spec() ->
+    AccountSpec = 
+	[{relay, mandatory, fun inet_parse:domain/1, ""},
+	 {port, optional,  {integer,1,65535}, undefined},
+	 {ssl, optional, boolean, false},
+	 {username, optional, string, undefined},
+	 {password, optional, string, undefined},
+	 {tls,optional,{alt,[{const,if_available},
+			     {const,always},
+			     {const,never}]}, if_available},
+	 {auth,optional,{alt,[{const,if_available},
+			      {const,always},
+			      {const,never}]}, if_available},
+	 {retries,optional,{integer,1,1000}, 1},
+	 {date,optional,{alt,[boolean,string]},false},
+	 {message_id,optional,{alt,[boolean,string]},false}],
+    [
+     {account,mandatory,{sys_config,hex_smtp,AccountSpec},undefined},
+     {from, mandatory, fun is_rfc822/1, undefined },
+     {to,   mandatory, fun is_rfc822_list/1, undefined },
+     {subject, optional, string, "no subject"},
+     {body,  mandatory, 
+      %% {text, Body::string()} |
+      %% {image, IType::string(), File::string()}
+      %% Body::string()
+      %% FIXME: add explicit unicode type!
+      {alt, [{tuple, [{const,text}, string]},
+	     {tuple, [{const,image},string, string]},
+	     string]}, undefined},
+     {date,optional,{alt,[boolean,string]},false},
+     {message_id,optional,{alt,[boolean,string]},false}
+    ].
 
 is_rfc822(Value) ->
-    case smtp_util:parse_rfc822_addresses(Value) of
+    try smtp_util:parse_rfc822_addresses(Value) of
 	{ok,[_]} -> true;
 	_ -> false
+    catch
+	error:_ -> false
     end.
 
 is_rfc822_list(Value) ->
-    case smtp_util:parse_rfc822_addresses(Value) of
+    try smtp_util:parse_rfc822_addresses(Value) of
 	{ok,[_|_]} -> true;
 	_ -> false
+    catch
+	error:_ -> false
     end.
 
 
@@ -235,4 +186,7 @@ get_gen_header(Key, Field, Flags, Gen) ->
     end.
 
 to_binary(Data) -> erlang:iolist_to_binary(Data).
-    
+
+to_utf8(Data) ->
+    unicode:characters_to_binary(Data).
+
