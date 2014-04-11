@@ -26,7 +26,9 @@
 -behaviour(hex_plugin).
 
 -export([validate_event/2, 
+	 event_spec/1,
 	 init_event/2,
+	 mod_event/2,
 	 add_event/3, 
 	 del_event/1, 
 	 output/2]).
@@ -49,9 +51,14 @@ del_event(_Ref) ->
 %%    ok.
 %%
 output(Flags0, Env) ->
-    Account = proplists:get_value(account, Flags0),
-    {ok,AccountFlags} = application:get_env(hex_smtp, Account),
-    Flags = proplists:delete(account,Flags0) ++ AccountFlags,
+    Flags = 
+	case proplists:get_value(account, Flags0) of
+	    {name,Name} ->
+		{ok,Fs1} = application:get_env(hex_smtp, Name),
+		proplists:delete(account,Flags0) ++ Fs1;
+	    {config,Fs1} ->
+		proplists:delete(account,Flags0) ++ Fs1
+	end,
     From = proplists:get_value(from, Flags),
     {ok,[{_Name,Sender}]} = smtp_util:parse_rfc822_addresses(From),
     To = proplists:get_value(to, Flags),
@@ -63,14 +70,12 @@ output(Flags0, Env) ->
 	    {text,Body} when is_list(Body); is_binary(Body) -> 
 		Utf8 = to_utf8(hex:text_expand(Body, Env)),
 		{<<"text">>,<<"plain">>,Utf8};
-	    {image,IType,File} ->
+	    {image,IFlags} ->
+		File  = proplists:get_value(filename, IFlags),
+		IType = proplists:get_value(mime_type, IFlags),
 		{ok,Bin} = file:read_file(File),
-		{<<"image">>,to_binary(IType),Bin};
-	    Body when is_list(Body); is_binary(Body) ->
-		Utf8 = to_utf8(hex:text_expand(Body, Env)),
-		{<<"text">>,<<"plain">>,Utf8}
+		{<<"image">>,to_binary(IType),Bin}
 	end,
-    
     Headers = [{<<"From">>, From}, {<<"To">>, To}] ++
 	get_header(subject, <<"Subject">>, Flags, []) ++
 	get_gen_header(date, <<"Date">>, Flags, 
@@ -107,61 +112,101 @@ init_event(_, _) ->
     ok.
 
 %%
+%% mod_event(in | out, Flags::[{atom(),term()}])
+%%
+mod_event(_, _) ->
+    ok.
+
+
+%%
 %% validate_event(in | out, Flags::[{atom(),term()}])
 %%
-validate_event(in, _Flags) ->
-    {error, no_input};
-validate_event(out, Flags) ->
-    hex:validate_flags(Flags,output_spec()).
+validate_event(Dir, Flags) ->
+    %% FIXME: handle account setting a bit special 
+    %%        check that account exist and that it 
+    %%        is checked against account config.
+    %% FIXME: handle yang standard types
+    %% FIXME: handle typedefs in a general way?
+    hex:validate_flags(Flags,event_spec(Dir)).
+
+event_spec(in) ->
+    [];
+event_spec(out) ->
+    output_spec().
 
 output_spec() ->
-    AccountSpec = 
-	[{relay, mandatory, fun inet_parse:domain/1, ""},
-	 {port, optional,  {integer,1,65535}, undefined},
-	 {ssl, optional, boolean, false},
-	 {username, optional, string, undefined},
-	 {password, optional, string, undefined},
-	 {tls,optional,{alt,[{const,if_available},
-			     {const,always},
-			     {const,never}]}, if_available},
-	 {auth,optional,{alt,[{const,if_available},
-			      {const,always},
-			      {const,never}]}, if_available},
-	 {retries,optional,{integer,1,1000}, 1},
-	 {date,optional,{alt,[boolean,string]},false},
-	 {message_id,optional,{alt,[boolean,string]},false}],
     [
-     {account,mandatory,{sys_config,hex_smtp,AccountSpec},undefined},
-     {from, mandatory, fun is_rfc822/1, undefined },
-     {to,   mandatory, fun is_rfc822_list/1, undefined },
-     {subject, optional, string, "no subject"},
-     {body,  mandatory, 
-      %% {text, Body::string()} |
-      %% {image, IType::string(), File::string()}
-      %% Body::string()
-      %% FIXME: add explicit unicode type!
-      {alt, [{tuple, [{const,text}, string]},
-	     {tuple, [{const,image},string, string]},
-	     string]}, undefined},
-     {date,optional,{alt,[boolean,string]},false},
-     {message_id,optional,{alt,[boolean,string]},false}
+     {choice,account,
+      [{'case',name,[{leaf,name,[{type,string,[]}]}]},
+       {'case',config,
+	[{container,config,
+	  [{leaf, relay, [{type, 'yang:domain-name', []},
+			  {mandatory,true,[]}]},
+	   {leaf, port, [{type, 'yang:port-number',[]}]},
+	   {leaf, ssl, [{type, boolean, []},{default,false,[]}]},
+	   {leaf, username, [{type, string,[]}]},
+	   {leaf, password, [{type, string, []}]},
+	   {leaf, tls, [{type,enumeration,
+			 [{enum,if_available,[]},
+			  {enum,always,[]},
+			  {enum,never,[]}]},
+			{default,if_available,[]}]},
+	   
+	   {leaf, auth, [{type,enumeration,
+			  [{enum,if_available,[]},
+			   {enum,always,[]},
+			   {enum,never,[]}]},
+			 {default,if_available,[]}]},
+	   {leaf, retries, [{type, uint32, []},
+			    {default, 1, []}]},
+	   {leaf, date, [{type, string, []},
+			 {default, false, []}]},
+	   {leaf, message_id, [{type, string, []},
+			       {default, false, []}]}
+	  ]}
+	]}
+      ]},
+     
+     {leaf, from, [{type,'hex:rfc822',[]},
+		   {mandatory, true, []}]},
+
+     {'leaf-list', to, [{type,'hex:rfc822',[]},
+		      {'min-elements',1,[]}]},
+
+     {leaf, subject, [{type, string, []},
+		      {default, "", []}]},
+
+     %% FIXME: make mixed body data!
+     {choice, body,
+      [{'case',text,
+	[{leaf, text, [{type,string,[]}]}]},
+       {'case',image,
+	[{container, image, 
+	  [{leaf, filename, [{type, string, []},{mandatory,true,[]}]},
+	   {leaf, mime_type, [{type, string, []},{default,"image/png",[]}]}
+	  ]}]}]},
+
+     {leaf, date, [{type, string, []},
+		   {default, false, []}]},
+     {leaf, message_id, [{type, string, []},
+			 {default, false, []}]}
     ].
 
-is_rfc822(Value) ->
-    try smtp_util:parse_rfc822_addresses(Value) of
-	{ok,[_]} -> true;
-	_ -> false
-    catch
-	error:_ -> false
-    end.
+%% is_rfc822(Value) ->
+%%    try smtp_util:parse_rfc822_addresses(Value) of
+%%	{ok,[_]} -> true;
+%%	_ -> false
+%%    catch
+%%	error:_ -> false
+%%    end.
 
-is_rfc822_list(Value) ->
-    try smtp_util:parse_rfc822_addresses(Value) of
-	{ok,[_|_]} -> true;
-	_ -> false
-    catch
-	error:_ -> false
-    end.
+%% is_rfc822_list(Value) ->
+%%    try smtp_util:parse_rfc822_addresses(Value) of
+%%	{ok,[_|_]} -> true;
+%%	_ -> false
+%%    catch
+%%	error:_ -> false
+%%    end.
 
 
 %% get_header(Key, Field, Flags) ->
