@@ -72,9 +72,14 @@ output(Flags0, Env) ->
 		{<<"text">>,<<"plain">>,Utf8};
 	    {image,IFlags} ->
 		File  = proplists:get_value(filename, IFlags),
-		IType = proplists:get_value(mime_type, IFlags),
+		MType = proplists:get_value(mime_type, IFlags),
 		{ok,Bin} = file:read_file(File),
-		{<<"image">>,to_binary(IType),Bin}
+		case string:tokens(MType, "/") of
+		    [SubType0] ->
+			{<<"image">>,to_binary(SubType0),Bin};
+		    [Type0,SubType0] ->
+			{to_binary(Type0),to_binary(SubType0),Bin}
+		end
 	end,
     Headers = [{<<"From">>, From}, {<<"To">>, To}] ++
 	get_header(subject, <<"Subject">>, Flags, []) ++
